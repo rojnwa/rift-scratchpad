@@ -1,0 +1,379 @@
+//! i3-style scratchpad for rift, built on its window claim API.
+//!
+//! Rift keybindings drive it with signals:
+//!
+//! ```toml
+//! "Alt + Escape"         = { exec = ["pkill", "-USR1", "-x", "rift-scratchpad"] } # toggle
+//! "Alt + Shift + Escape" = { exec = ["pkill", "-USR2", "-x", "rift-scratchpad"] } # park
+//! ```
+//!
+//! Park claims the focused window from rift and moves it offscreen. Toggle hides the focused
+//! scratchpad window; otherwise it brings back a visible one, or the next parked one, where it
+//! last sat, and with nothing to show it parks the focused window. Focus follows mouse
+//! is paused while a scratchpad window is shown. Quitting puts parked windows back where they
+//! were and hands every claimed window back to rift.
+
+use std::collections::VecDeque;
+use std::error::Error;
+use std::ptr::{self, NonNull};
+
+use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
+use objc2_core_foundation::{
+    CFBoolean, CFRetained, CFString, CFType, CGPoint, CGSize, ConcreteType,
+};
+use rift_client::{
+    ClientError, ConfigCommand, Rect, RiftCommand, RiftMachClient, WindowId,
+    WindowManagementSession,
+};
+
+/// Rift hides inactive-workspace windows the same way: all but one pixel past a bottom corner.
+const REVEAL_PX: f64 = 1.0;
+
+type AxResult<T> = Result<T, AXError>;
+
+unsafe extern "C-unwind" {
+    fn _AXUIElementGetWindow(element: &AXUIElement, id: &mut u32) -> AXError;
+}
+
+struct Window {
+    id: WindowId,
+    ax: CFRetained<AXUIElement>,
+    /// Where the window last sat on screen: shown there again, and restored on quit.
+    position: CGPoint,
+}
+
+struct Scratchpad {
+    client: RiftMachClient,
+    session: WindowManagementSession,
+    hidden: VecDeque<Window>,
+    shown: Vec<Window>,
+    paused_focus_follows_mouse: bool,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // Blocked before anything else so an early pkill is queued instead of killing us.
+    let signals = block_signals(&[
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGINT,
+        libc::SIGTERM,
+        libc::SIGHUP,
+    ]);
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("needs Accessibility access (System Settings > Privacy & Security)".into());
+    }
+    let client = RiftMachClient::connect()?;
+    let session = client.window_management_session()?;
+    let mut pad = Scratchpad {
+        client,
+        session,
+        hidden: VecDeque::new(),
+        shown: Vec::new(),
+        paused_focus_follows_mouse: false,
+    };
+    loop {
+        let result = match wait_for(&signals) {
+            libc::SIGUSR1 => pad.toggle(),
+            libc::SIGUSR2 => pad.park(),
+            _ => break,
+        };
+        let synced = pad.sync_focus_follows_mouse();
+        for error in [result, synced].into_iter().filter_map(Result::err) {
+            eprintln!("rift-scratchpad: {error}");
+        }
+    }
+    pad.restore();
+    Ok(())
+}
+
+impl Scratchpad {
+    fn toggle(&mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(window) = focused_window(&self.client)
+            .ok()
+            .and_then(|(id, _)| self.take_shown(id))
+        {
+            return self.hide(window);
+        }
+        let (display, others) = self.displays()?;
+        // Rift forgets closed windows; one left queued here would fail every toggle.
+        let client = &self.client;
+        let open = |window: &Window| {
+            !matches!(
+                client.get_window_info(window.id),
+                Err(ClientError::Server(_))
+            )
+        };
+        self.hidden.retain(open);
+        self.shown.retain(open);
+        let Some(window) = self.shown.pop().or_else(|| self.hidden.pop_front()) else {
+            return self.park();
+        };
+        if let Err(error) = show(&window, display, &others) {
+            // Sent to the back so a window that won't show doesn't block the others.
+            self.hidden.push_back(window);
+            return Err(ax_error(error));
+        }
+        self.shown.push(window);
+        Ok(())
+    }
+
+    fn park(&mut self) -> Result<(), Box<dyn Error>> {
+        let (id, ax) = focused_window(&self.client)?;
+        if let Some(window) = self.take_shown(id) {
+            return self.hide(window);
+        }
+        if self.hidden.iter().any(|window| window.id == id) {
+            return Ok(());
+        }
+        let origin = self.client.get_window_info(id)?.frame.origin;
+        self.session.claim_window(id)?;
+        let position = CGPoint::new(origin.x, origin.y);
+        self.hide(Window { id, ax, position })
+    }
+
+    fn hide(&mut self, mut window: Window) -> Result<(), Box<dyn Error>> {
+        let moved = self.displays().and_then(|(display, others)| {
+            window.position = position(&window.ax).map_err(ax_error)?;
+            let size = size(&window.ax).map_err(ax_error)?;
+            set_position(&window.ax, hidden_origin(display, &others, size)).map_err(ax_error)
+        });
+        // Queued even if the move failed, so toggle can still bring it back.
+        self.hidden.push_back(window);
+        moved
+    }
+
+    fn take_shown(&mut self, id: WindowId) -> Option<Window> {
+        let index = self.shown.iter().position(|window| window.id == id)?;
+        Some(self.shown.remove(index))
+    }
+
+    /// The focused display's frame, and the frames of all the others.
+    fn displays(&self) -> Result<(Rect, Vec<Rect>), Box<dyn Error>> {
+        let (active, others): (Vec<_>, Vec<_>) = self
+            .client
+            .get_displays()?
+            .into_iter()
+            .partition(|display| display.is_active_context);
+        let display = active
+            .first()
+            .or(others.first())
+            .ok_or("rift reports no displays")?
+            .frame;
+        Ok((
+            display,
+            others.iter().map(|display| display.frame).collect(),
+        ))
+    }
+
+    /// Focus follows mouse raises whatever the pointer crosses, burying a shown scratchpad
+    /// window, so it is paused while one is shown.
+    fn sync_focus_follows_mouse(&mut self) -> Result<(), Box<dyn Error>> {
+        let pause = !self.shown.is_empty();
+        if pause == self.paused_focus_follows_mouse {
+            return Ok(());
+        }
+        if pause && self.client.get_config()?["settings"]["focus_follows_mouse"] != true {
+            return Ok(());
+        }
+        self.set_focus_follows_mouse(!pause)?;
+        self.paused_focus_follows_mouse = pause;
+        Ok(())
+    }
+
+    fn set_focus_follows_mouse(&self, enabled: bool) -> Result<(), ClientError> {
+        let command = ConfigCommand::SetFocusFollowsMouse(enabled);
+        self.client.execute(RiftCommand::Config(command)).map(drop)
+    }
+
+    /// Dropping the session afterwards is what hands the windows back to rift.
+    fn restore(&self) {
+        for window in &self.hidden {
+            let _ = set_position(&window.ax, window.position);
+        }
+        if self.paused_focus_follows_mouse {
+            let _ = self.set_focus_follows_mouse(true);
+        }
+    }
+}
+
+/// Shows the window where it last sat, or centred on `display` when that spot is on no display
+/// anymore, e.g. after unplugging a monitor.
+fn show(window: &Window, display: Rect, others: &[Rect]) -> AxResult<()> {
+    let at = window.position;
+    let on = |r: &Rect| {
+        (r.origin.x..r.origin.x + r.size.width).contains(&at.x)
+            && (r.origin.y..r.origin.y + r.size.height).contains(&at.y)
+    };
+    let position = if on(&display) || others.iter().any(on) {
+        at
+    } else {
+        let size = size(&window.ax)?;
+        CGPoint::new(
+            display.origin.x + (display.size.width - size.width) / 2.0,
+            display.origin.y + (display.size.height - size.height) / 2.0,
+        )
+    };
+    set_position(&window.ax, position)?;
+    check(unsafe {
+        window
+            .ax
+            .perform_action(&CFString::from_static_str("AXRaise"))
+    })?;
+    set(&window.ax, "AXMain", CFBoolean::new(true))?;
+    let app = unsafe { AXUIElement::new_application(window.id.pid) };
+    set(&app, "AXFrontmost", CFBoolean::new(true))
+}
+
+/// All but a pixel past whichever bottom corner of `display` overlaps the other displays least.
+fn hidden_origin(display: Rect, others: &[Rect], size: CGSize) -> CGPoint {
+    let y = display.origin.y + display.size.height - REVEAL_PX;
+    let right = display.origin.x + display.size.width - REVEAL_PX;
+    let left = display.origin.x - size.width + REVEAL_PX;
+    let overlap = |x: f64| {
+        others
+            .iter()
+            .map(|other| {
+                let width = ((x + size.width).min(other.origin.x + other.size.width)
+                    - x.max(other.origin.x))
+                .max(0.0);
+                let height = ((y + size.height).min(other.origin.y + other.size.height)
+                    - y.max(other.origin.y))
+                .max(0.0);
+                width * height
+            })
+            .sum::<f64>()
+    };
+    CGPoint::new(
+        if overlap(left) < overlap(right) {
+            left
+        } else {
+            right
+        },
+        y,
+    )
+}
+
+fn focused_window(
+    client: &RiftMachClient,
+) -> Result<(WindowId, CFRetained<AXUIElement>), Box<dyn Error>> {
+    // The system-wide AXFocusedApplication query fails with kAXErrorCannotComplete (seen on
+    // macOS 27), so the frontmost app comes from rift instead.
+    let pid = client
+        .get_applications()?
+        .into_iter()
+        .find(|app| app.is_frontmost)
+        .ok_or("rift reports no frontmost app")?
+        .pid;
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let window: CFRetained<AXUIElement> = copy(&app, "AXFocusedWindow").map_err(ax_error)?;
+    let mut idx = 0;
+    // Rift's window idx is the WindowServer id.
+    check(unsafe { _AXUIElementGetWindow(&window, &mut idx) }).map_err(ax_error)?;
+    Ok((WindowId { pid, idx }, window))
+}
+
+fn size(window: &AXUIElement) -> AxResult<CGSize> {
+    read(window, "AXSize", AXValueType::CGSize, CGSize::ZERO)
+}
+
+fn position(window: &AXUIElement) -> AxResult<CGPoint> {
+    read(window, "AXPosition", AXValueType::CGPoint, CGPoint::ZERO)
+}
+
+fn read<T>(
+    window: &AXUIElement,
+    attribute: &'static str,
+    ty: AXValueType,
+    mut out: T,
+) -> AxResult<T> {
+    let value: CFRetained<AXValue> = copy(window, attribute)?;
+    let ok = unsafe { value.value(ty, NonNull::from(&mut out).cast()) };
+    ok.then_some(out).ok_or(AXError::Failure)
+}
+
+fn set_position(window: &AXUIElement, mut point: CGPoint) -> AxResult<()> {
+    let value = unsafe { AXValue::new(AXValueType::CGPoint, NonNull::from(&mut point).cast()) }
+        .ok_or(AXError::Failure)?;
+    set(window, "AXPosition", &value)
+}
+
+fn copy<T: ConcreteType>(
+    element: &AXUIElement,
+    attribute: &'static str,
+) -> AxResult<CFRetained<T>> {
+    let mut value: *const CFType = ptr::null();
+    check(unsafe {
+        element.copy_attribute_value(
+            &CFString::from_static_str(attribute),
+            NonNull::from(&mut value),
+        )
+    })?;
+    let value = NonNull::new(value.cast_mut()).ok_or(AXError::NoValue)?;
+    // Copy rule: the caller owns the returned value.
+    unsafe { CFRetained::from_raw(value) }
+        .downcast::<T>()
+        .map_err(|_| AXError::Failure)
+}
+
+fn set(element: &AXUIElement, attribute: &'static str, value: &CFType) -> AxResult<()> {
+    check(unsafe { element.set_attribute_value(&CFString::from_static_str(attribute), value) })
+}
+
+fn check(error: AXError) -> AxResult<()> {
+    if error == AXError::Success {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn ax_error(error: AXError) -> Box<dyn Error> {
+    format!("accessibility error {error:?}").into()
+}
+
+fn block_signals(signals: &[libc::c_int]) -> libc::sigset_t {
+    unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for &signal in signals {
+            libc::sigaddset(&mut set, signal);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, ptr::null_mut());
+        set
+    }
+}
+
+fn wait_for(signals: &libc::sigset_t) -> libc::c_int {
+    let mut signal = 0;
+    unsafe { libc::sigwait(signals, &mut signal) };
+    signal
+}
+
+#[cfg(test)]
+mod tests {
+    use rift_client::{Point, Size};
+
+    use super::*;
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+        Rect {
+            origin: Point { x, y },
+            size: Size { width, height },
+        }
+    }
+
+    #[test]
+    fn hides_past_the_corner_that_avoids_other_displays() {
+        let display = rect(0.0, 0.0, 1000.0, 800.0);
+        let size = CGSize::new(200.0, 100.0);
+        assert_eq!(
+            hidden_origin(display, &[], size),
+            CGPoint::new(999.0, 799.0)
+        );
+        let right_neighbour = rect(1000.0, 0.0, 1000.0, 800.0);
+        assert_eq!(
+            hidden_origin(display, &[right_neighbour], size),
+            CGPoint::new(-199.0, 799.0)
+        );
+    }
+}

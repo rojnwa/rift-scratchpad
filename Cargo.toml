@@ -1,0 +1,22 @@
+[package]
+name = "rift-scratchpad"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The window claim API is acsandmann/rift#519; point this at main once it merges.
+rift-client = { git = "https://github.com/acsandmann/rift", branch = "feat/claim-window" }
+libc = "0.2"
+objc2-application-services = { version = "0.3.2", default-features = false, features = [
+    "AXError",
+    "AXUIElement",
+    "AXValue",
+    "HIServices",
+    "libc",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "CFCGTypes",
+    "CFNumber",
+    "CFString",
+] }
