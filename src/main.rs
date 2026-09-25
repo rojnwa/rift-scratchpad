@@ -9,9 +9,9 @@
 //!
 //! Park claims the focused window from rift and moves it offscreen. Toggle hides the focused
 //! scratchpad window; otherwise it brings back a visible one, or the next parked one, where it
-//! last sat, and with nothing to show it parks the focused window. Focus follows mouse
-//! is paused while a scratchpad window is shown. Quitting puts parked windows back where they
-//! were and hands every claimed window back to rift.
+//! last sat, and with nothing to show it parks the focused window. Windows are claimed so that
+//! rift suspends focus follows mouse while one of them has focus. Quitting puts parked windows
+//! back where they were and hands every claimed window back to rift.
 
 use std::collections::VecDeque;
 use std::error::Error;
@@ -22,8 +22,7 @@ use objc2_core_foundation::{
     CFBoolean, CFRetained, CFString, CFType, CGPoint, CGSize, ConcreteType,
 };
 use rift_client::{
-    ClientError, ConfigCommand, Rect, RiftCommand, RiftMachClient, WindowId,
-    WindowManagementSession,
+    ClientError, Rect, RiftMachClient, WindowClaimFlags, WindowId, WindowManagementSession,
 };
 
 /// Rift hides inactive-workspace windows the same way: all but one pixel past a bottom corner.
@@ -47,7 +46,6 @@ struct Scratchpad {
     session: WindowManagementSession,
     hidden: VecDeque<Window>,
     shown: Vec<Window>,
-    paused_focus_follows_mouse: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -69,7 +67,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         session,
         hidden: VecDeque::new(),
         shown: Vec::new(),
-        paused_focus_follows_mouse: false,
     };
     loop {
         let result = match wait_for(&signals) {
@@ -77,8 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             libc::SIGUSR2 => pad.park(),
             _ => break,
         };
-        let synced = pad.sync_focus_follows_mouse();
-        for error in [result, synced].into_iter().filter_map(Result::err) {
+        if let Err(error) = result {
             eprintln!("rift-scratchpad: {error}");
         }
     }
@@ -126,7 +122,9 @@ impl Scratchpad {
             return Ok(());
         }
         let origin = self.client.get_window_info(id)?.frame.origin;
-        self.session.claim_window(id)?;
+        // Focus follows mouse would otherwise raise whatever the pointer crosses over it.
+        self.session
+            .claim_window_with_flags(id, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)?;
         let position = CGPoint::new(origin.x, origin.y);
         self.hide(Window { id, ax, position })
     }
@@ -165,33 +163,10 @@ impl Scratchpad {
         ))
     }
 
-    /// Focus follows mouse raises whatever the pointer crosses, burying a shown scratchpad
-    /// window, so it is paused while one is shown.
-    fn sync_focus_follows_mouse(&mut self) -> Result<(), Box<dyn Error>> {
-        let pause = !self.shown.is_empty();
-        if pause == self.paused_focus_follows_mouse {
-            return Ok(());
-        }
-        if pause && self.client.get_config()?["settings"]["focus_follows_mouse"] != true {
-            return Ok(());
-        }
-        self.set_focus_follows_mouse(!pause)?;
-        self.paused_focus_follows_mouse = pause;
-        Ok(())
-    }
-
-    fn set_focus_follows_mouse(&self, enabled: bool) -> Result<(), ClientError> {
-        let command = ConfigCommand::SetFocusFollowsMouse(enabled);
-        self.client.execute(RiftCommand::Config(command)).map(drop)
-    }
-
     /// Dropping the session afterwards is what hands the windows back to rift.
     fn restore(&self) {
         for window in &self.hidden {
             let _ = set_position(&window.ax, window.position);
-        }
-        if self.paused_focus_follows_mouse {
-            let _ = self.set_focus_follows_mouse(true);
         }
     }
 }

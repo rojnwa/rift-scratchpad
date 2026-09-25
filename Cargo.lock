@@ -67,7 +67,7 @@ dependencies = [
 [[package]]
 name = "rift-client"
 version = "0.1.0"
-source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#191896824d1a3329c0de7f4b71e78f00aa1745b6"
+source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#53a2bee3f8c9a15d3eb6c7a8b64fddbfc8496bf0"
 dependencies = [
  "rift-protocol",
  "serde",
@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "rift-protocol"
 version = "0.1.0"
-source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#191896824d1a3329c0de7f4b71e78f00aa1745b6"
+source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#53a2bee3f8c9a15d3eb6c7a8b64fddbfc8496bf0"
 dependencies = [
  "serde",
  "serde_json",
