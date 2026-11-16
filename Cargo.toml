@@ -5,8 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# The window claim API is acsandmann/rift#519; point this at main once it merges.
-rift-client = { git = "https://github.com/acsandmann/rift", branch = "feat/claim-window" }
+rift-client = { git = "https://github.com/acsandmann/rift", branch = "main" }
 libc = "0.2"
 objc2-application-services = { version = "0.3.2", default-features = false, features = [
     "AXError",

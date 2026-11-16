@@ -1,7 +1,7 @@
 # rift-scratchpad
 
 An i3-style scratchpad for [rift](https://github.com/acsandmann/rift), built on its window claim
-API ([acsandmann/rift#519](https://github.com/acsandmann/rift/pull/519), not merged yet).
+API (rift 0.8.0 or newer).
 
 - **Park** claims the focused window from rift and moves it just offscreen, the way rift hides
   windows on inactive workspaces.

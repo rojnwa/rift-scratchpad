@@ -67,7 +67,7 @@ dependencies = [
 [[package]]
 name = "rift-client"
 version = "0.1.0"
-source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#53a2bee3f8c9a15d3eb6c7a8b64fddbfc8496bf0"
+source = "git+https://github.com/acsandmann/rift?branch=main#23d52b5a36df2597e2880ca243061445d989f5b4"
 dependencies = [
  "rift-protocol",
  "serde",
@@ -76,10 +76,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-config-derive"
+version = "0.1.0"
+source = "git+https://github.com/acsandmann/rift?branch=main#23d52b5a36df2597e2880ca243061445d989f5b4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "rift-protocol"
 version = "0.1.0"
-source = "git+https://github.com/acsandmann/rift?branch=feat%2Fclaim-window#53a2bee3f8c9a15d3eb6c7a8b64fddbfc8496bf0"
+source = "git+https://github.com/acsandmann/rift?branch=main#23d52b5a36df2597e2880ca243061445d989f5b4"
 dependencies = [
+ "rift-config-derive",
  "serde",
  "serde_json",
 ]
@@ -121,7 +132,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -135,6 +146,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -165,7 +187,7 @@ checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.6",
 ]
 
 [[package]]
