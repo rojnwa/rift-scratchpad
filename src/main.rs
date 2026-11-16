@@ -7,9 +7,10 @@
 //! "Alt + Shift + Escape" = { exec = ["pkill", "-USR2", "-x", "rift-scratchpad"] } # park
 //! ```
 //!
-//! Park claims the focused window from rift and moves it offscreen. Toggle hides the focused
+//! Park claims the focused window from rift and moves it offscreen, or hands it back to rift
+//! if it is already in the scratchpad. Toggle hides the focused
 //! scratchpad window; otherwise it brings back a visible one, or the next parked one, where it
-//! last sat, and with nothing to show it parks the focused window. Windows are claimed so that
+//! last sat, and does nothing with nothing to show. Windows are claimed so that
 //! rift suspends focus follows mouse while one of them has focus. Quitting puts parked windows
 //! back where they were and hands every claimed window back to rift.
 
@@ -102,7 +103,7 @@ impl Scratchpad {
         self.hidden.retain(open);
         self.shown.retain(open);
         let Some(window) = self.shown.pop().or_else(|| self.hidden.pop_front()) else {
-            return self.park();
+            return Ok(());
         };
         if let Err(error) = show(&window, display, &others) {
             // Sent to the back so a window that won't show doesn't block the others.
@@ -115,10 +116,16 @@ impl Scratchpad {
 
     fn park(&mut self) -> Result<(), Box<dyn Error>> {
         let (id, ax) = focused_window(&self.client)?;
-        if let Some(window) = self.take_shown(id) {
-            return self.hide(window);
+        if let Some(index) = self.shown.iter().position(|window| window.id == id) {
+            self.session.release_window(id)?;
+            self.shown.remove(index);
+            return Ok(());
         }
-        if self.hidden.iter().any(|window| window.id == id) {
+        if let Some(index) = self.hidden.iter().position(|window| window.id == id) {
+            let window = &self.hidden[index];
+            set_position(&window.ax, window.position).map_err(ax_error)?;
+            self.session.release_window(id)?;
+            self.hidden.remove(index);
             return Ok(());
         }
         let origin = self.client.get_window_info(id)?.frame.origin;
