@@ -223,33 +223,37 @@ fn show(window: &Window, display: Rect, others: &[Rect]) -> AxResult<()> {
     set(&app, "AXFrontmost", CFBoolean::new(true))
 }
 
-/// All but a pixel past whichever bottom corner of `display` overlaps the other displays least.
+/// All but a pixel past the bottom corner, of `display` or else of another display, that puts
+/// the least of the window on any display. macOS keeps the top of a window on screen, so past a
+/// corner that borders another display a strip of it shows there.
 fn hidden_origin(display: Rect, others: &[Rect], size: CGSize) -> CGPoint {
-    let y = display.origin.y + display.size.height - REVEAL_PX;
-    let right = display.origin.x + display.size.width - REVEAL_PX;
-    let left = display.origin.x - size.width + REVEAL_PX;
-    let overlap = |x: f64| {
-        others
+    let displays: Vec<Rect> = std::iter::once(display)
+        .chain(others.iter().copied())
+        .collect();
+    let overlap = |origin: &CGPoint| {
+        displays
             .iter()
             .map(|other| {
-                let width = ((x + size.width).min(other.origin.x + other.size.width)
-                    - x.max(other.origin.x))
+                let width = ((origin.x + size.width).min(other.origin.x + other.size.width)
+                    - origin.x.max(other.origin.x))
                 .max(0.0);
-                let height = ((y + size.height).min(other.origin.y + other.size.height)
-                    - y.max(other.origin.y))
+                let height = ((origin.y + size.height).min(other.origin.y + other.size.height)
+                    - origin.y.max(other.origin.y))
                 .max(0.0);
                 width * height
             })
             .sum::<f64>()
     };
-    CGPoint::new(
-        if overlap(left) < overlap(right) {
-            left
-        } else {
-            right
-        },
-        y,
-    )
+    displays
+        .iter()
+        .flat_map(|corner| {
+            let y = corner.origin.y + corner.size.height - REVEAL_PX;
+            let right = corner.origin.x + corner.size.width - REVEAL_PX;
+            let left = corner.origin.x - size.width + REVEAL_PX;
+            [CGPoint::new(right, y), CGPoint::new(left, y)]
+        })
+        .min_by(|a, b| overlap(a).total_cmp(&overlap(b)))
+        .expect("`display` always has corners")
 }
 
 fn focused_window(
@@ -373,6 +377,12 @@ mod tests {
         assert_eq!(
             hidden_origin(display, &[right_neighbour], size),
             CGPoint::new(-199.0, 799.0)
+        );
+        // Between two displays neither of its own corners is free, so it borrows an outer one.
+        let left_neighbour = rect(-1000.0, 0.0, 1000.0, 800.0);
+        assert_eq!(
+            hidden_origin(display, &[left_neighbour, right_neighbour], size),
+            CGPoint::new(-1199.0, 799.0)
         );
     }
 }
