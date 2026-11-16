@@ -13,6 +13,9 @@
 //! last sat, and does nothing with nothing to show. Windows are claimed so that
 //! rift suspends focus follows mouse while one of them has focus. Quitting puts parked windows
 //! back where they were and hands every claimed window back to rift.
+//!
+//! Started with `--toggle-parks`, Toggle parks the focused window when there is nothing to show,
+//! so one key is enough.
 
 use std::collections::VecDeque;
 use std::error::Error;
@@ -47,6 +50,8 @@ struct Scratchpad {
     session: WindowManagementSession,
     hidden: VecDeque<Window>,
     shown: Vec<Window>,
+    /// Toggle parks the focused window when there is nothing to show.
+    toggle_parks: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -58,6 +63,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         libc::SIGTERM,
         libc::SIGHUP,
     ]);
+    let toggle_parks = match std::env::args().nth(1).as_deref() {
+        None => false,
+        Some("--toggle-parks") => true,
+        Some(other) => {
+            return Err(format!("unknown argument {other}, expected --toggle-parks").into());
+        }
+    };
     if !unsafe { AXIsProcessTrusted() } {
         return Err("needs Accessibility access (System Settings > Privacy & Security)".into());
     }
@@ -68,6 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         session,
         hidden: VecDeque::new(),
         shown: Vec::new(),
+        toggle_parks,
     };
     loop {
         let result = match wait_for(&signals) {
@@ -103,7 +116,11 @@ impl Scratchpad {
         self.hidden.retain(open);
         self.shown.retain(open);
         let Some(window) = self.shown.pop().or_else(|| self.hidden.pop_front()) else {
-            return Ok(());
+            return if self.toggle_parks {
+                self.park()
+            } else {
+                Ok(())
+            };
         };
         if let Err(error) = show(&window, display, &others) {
             // Sent to the back so a window that won't show doesn't block the others.

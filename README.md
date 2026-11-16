@@ -7,7 +7,8 @@ API (rift 0.8.0 or newer).
   windows on inactive workspaces. If it is already in the scratchpad, Park removes it and hands
   it back to rift instead.
 - **Toggle** hides the focused scratchpad window. Otherwise it brings back a visible one, or the
-  next parked one, where it last sat. With nothing to show it does nothing.
+  next parked one, where it last sat. With nothing to show it does nothing, unless started with
+  `--toggle-parks`: then it parks the focused window, so one key is enough.
 - Windows are claimed with rift's `SUPPRESS_FOCUS_FOLLOWS_MOUSE` flag, so while a scratchpad
   window has focus, hovering other windows doesn't bury it.
 - Quitting puts parked windows back and hands every claimed window back to rift.
